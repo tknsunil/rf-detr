@@ -526,6 +526,11 @@ class AlbumentationsWrapper:
             masks_list = [mask for mask in masks_np]
 
         if "keypoints" in target:
+            try:
+                print("Keypoints", type(target["keypoints"]), target["keypoints"].shape)
+            except Exception:
+                pass
+
             keypoints = target["keypoints"]
             keypoints_np = (
                 keypoints.cpu().numpy() if torch.is_tensor(keypoints) else np.array(keypoints)
@@ -558,7 +563,7 @@ class AlbumentationsWrapper:
             keypoints_pixel[..., 1] *= orig_h
 
             N, K, _ = keypoints_pixel.shape
-            keypoints_list = keypoints_pixel.reshape(N * K, 3).tolist()
+            keypoints_list = keypoints_pixel.reshape(N * K, 3)
 
         # Filter degenerate boxes
         if num_boxes > 0:
@@ -575,7 +580,7 @@ class AlbumentationsWrapper:
                 if keypoints_list is not None:
                     keypoints_pixel = keypoints_pixel[valid_mask]
                     N = keypoints_pixel.shape[0]
-                    keypoints_list = keypoints_pixel.reshape(N * K, 3).tolist()
+                    keypoints_list = keypoints_pixel.reshape(N * K, 3)
 
         transform_kwargs = {
             "image": image_np,
