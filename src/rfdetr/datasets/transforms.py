@@ -20,12 +20,7 @@ Transforms and data augmentation for both image + bbox.
 from __future__ import annotations
 
 import inspect
-import random
-
-import PIL
-import numpy as np
 from collections.abc import Sequence
-from numbers import Number
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -37,499 +32,12 @@ import numpy as np
 import PIL
 import torch
 from PIL import Image
-import torch
-import torchvision.transforms as T
-
 from torchvision.transforms import Normalize as _TVNormalize
-import torchvision.transforms.functional as F
 
 from rfdetr.util.box_ops import box_xyxy_to_cxcywh
-from rfdetr.util.misc import interpolate
 from rfdetr.util.logger import get_logger
 
 logger = get_logger()
-
-
-def crop(image, target, region):
-    cropped_image = F.crop(image, *region)
-
-    target = target.copy()
-    i, j, h, w = region
-
-    # should we do something wrt the original size?
-    target["size"] = torch.tensor([h, w])
-
-    fields = ["labels", "area", "iscrowd"]
-
-    if "boxes" in target:
-        boxes = target["boxes"]
-        max_size = torch.as_tensor([w, h], dtype=torch.float32)
-        cropped_boxes = boxes - torch.as_tensor([j, i, j, i])
-        cropped_boxes = torch.min(cropped_boxes.reshape(-1, 2, 2), max_size)
-        cropped_boxes = cropped_boxes.clamp(min=0)
-        area = (cropped_boxes[:, 1, :] - cropped_boxes[:, 0, :]).prod(dim=1)
-        target["boxes"] = cropped_boxes.reshape(-1, 4)
-        target["area"] = area
-        fields.append("boxes")
-
-    if "masks" in target:
-        # FIXME should we update the area here if there are no boxes?
-        target["masks"] = target["masks"][:, i : i + h, j : j + w]
-        fields.append("masks")
-
-    if "keypoints" in target:
-        # Get original image size from target
-        orig_h, orig_w = target.get("orig_size", target["size"]).tolist()
-
-        keypoints = target["keypoints"].clone()  # [N, K, 3]
-
-        # Convert normalized coords to pixel coords in original image
-        keypoints[..., 0] = keypoints[..., 0] * orig_w
-        keypoints[..., 1] = keypoints[..., 1] * orig_h
-
-        # Apply crop offset
-        keypoints[..., 0] = keypoints[..., 0] - j
-        keypoints[..., 1] = keypoints[..., 1] - i
-
-        # Mark keypoints outside crop region as invisible
-        outside = (
-            (keypoints[..., 0] < 0)
-            | (keypoints[..., 0] >= w)
-            | (keypoints[..., 1] < 0)
-            | (keypoints[..., 1] >= h)
-        )
-        keypoints[..., 2] = torch.where(
-            outside, torch.zeros_like(keypoints[..., 2]), keypoints[..., 2]
-        )
-
-        # Clamp to valid range
-        keypoints[..., 0] = keypoints[..., 0].clamp(0, w - 1)
-        keypoints[..., 1] = keypoints[..., 1].clamp(0, h - 1)
-
-        # Convert back to normalized coords
-        keypoints[..., 0] = keypoints[..., 0] / w
-        keypoints[..., 1] = keypoints[..., 1] / h
-
-        target["keypoints"] = keypoints
-        fields.append("keypoints")
-
-    # remove elements for which the boxes or masks that have zero area
-    if "boxes" in target or "masks" in target:
-        # favor boxes selection when defining which elements to keep
-        # this is compatible with previous implementation
-        if "boxes" in target:
-            cropped_boxes = target["boxes"].reshape(-1, 2, 2)
-            keep = torch.all(cropped_boxes[:, 1, :] > cropped_boxes[:, 0, :], dim=1)
-        else:
-            keep = target["masks"].flatten(1).any(1)
-
-        for field in fields:
-            target[field] = target[field][keep]
-
-    return cropped_image, target
-
-
-def hflip(image, target):
-    flipped_image = F.hflip(image)
-
-    w, h = image.size
-
-    target = target.copy()
-    if "boxes" in target:
-        boxes = target["boxes"]
-        boxes = boxes[:, [2, 1, 0, 3]] * torch.as_tensor(
-            [-1, 1, -1, 1]
-        ) + torch.as_tensor([w, 0, w, 0])
-        target["boxes"] = boxes
-
-    if "masks" in target:
-        target["masks"] = target["masks"].flip(-1)
-
-    if "keypoints" in target:
-        keypoints = target["keypoints"].clone()  # [N, K, 3]
-
-        # Flip x coordinate (keypoints are in normalized [0,1] coords)
-        keypoints[..., 0] = 1.0 - keypoints[..., 0]
-
-        # Swap left/right keypoint pairs (COCO 17-keypoint format)
-        # Pairs: (left_eye, right_eye), (left_ear, right_ear), ...
-        flip_pairs = [
-            (1, 2),  # left_eye <-> right_eye
-            (3, 4),  # left_ear <-> right_ear
-            (5, 6),  # left_shoulder <-> right_shoulder
-            (7, 8),  # left_elbow <-> right_elbow
-            (9, 10),  # left_wrist <-> right_wrist
-            (11, 12),  # left_hip <-> right_hip
-            (13, 14),  # left_knee <-> right_knee
-            (15, 16),  # left_ankle <-> right_ankle
-        ]
-
-        # Only swap if we have enough keypoints
-        num_keypoints = keypoints.shape[1]
-        for left, right in flip_pairs:
-            if left < num_keypoints and right < num_keypoints:
-                keypoints[:, [left, right]] = keypoints[:, [right, left]]
-
-        target["keypoints"] = keypoints
-
-    return flipped_image, target
-
-
-def resize(image, target, size, max_size=None):
-    # size can be min_size (scalar) or (w, h) tuple
-
-    def get_size_with_aspect_ratio(image_size, size, max_size=None):
-        w, h = image_size
-        if max_size is not None:
-            min_original_size = float(min((w, h)))
-            max_original_size = float(max((w, h)))
-            if max_original_size / min_original_size * size > max_size:
-                size = int(round(max_size * min_original_size / max_original_size))
-
-        if (w <= h and w == size) or (h <= w and h == size):
-            return (h, w)
-
-        if w < h:
-            ow = size
-            oh = int(size * h / w)
-        else:
-            oh = size
-            ow = int(size * w / h)
-
-        return (oh, ow)
-
-    def get_size(image_size, size, max_size=None):
-        if isinstance(size, (list, tuple)):
-            return size[::-1]
-        else:
-            return get_size_with_aspect_ratio(image_size, size, max_size)
-
-    size = get_size(image.size, size, max_size)
-    rescaled_image = F.resize(image, size)
-
-    if target is None:
-        return rescaled_image, None
-
-    ratios = tuple(
-        float(s) / float(s_orig) for s, s_orig in zip(rescaled_image.size, image.size)
-    )
-    ratio_width, ratio_height = ratios
-
-    target = target.copy()
-    if "boxes" in target:
-        boxes = target["boxes"]
-        scaled_boxes = boxes * torch.as_tensor(
-            [ratio_width, ratio_height, ratio_width, ratio_height]
-        )
-        target["boxes"] = scaled_boxes
-
-    if "area" in target:
-        area = target["area"]
-        scaled_area = area * (ratio_width * ratio_height)
-        target["area"] = scaled_area
-
-    h, w = size
-    target["size"] = torch.tensor([h, w])
-
-    if "masks" in target:
-        target["masks"] = (
-            interpolate(target["masks"][:, None].float(), size, mode="nearest")[:, 0]
-            > 0.5
-        )
-
-    return rescaled_image, target
-
-
-def pad(image, target, padding):
-    # assumes that we only pad on the bottom right corners
-    padded_image = F.pad(image, (0, 0, padding[0], padding[1]))
-    if target is None:
-        return padded_image, None
-    target = target.copy()
-    # should we do something wrt the original size?
-    target["size"] = torch.tensor(padded_image.size[::-1])
-    if "masks" in target:
-        target["masks"] = torch.nn.functional.pad(
-            target["masks"], (0, padding[0], 0, padding[1])
-        )
-    return padded_image, target
-
-
-class RandomCrop(object):
-    def __init__(self, size):
-        self.size = size
-
-    def __call__(self, img, target):
-        region = T.RandomCrop.get_params(img, self.size)
-        return crop(img, target, region)
-
-
-class RandomSizeCrop(object):
-    def __init__(self, min_size: int, max_size: int):
-        self.min_size = min_size
-        self.max_size = max_size
-
-    def __call__(self, img: PIL.Image.Image, target: dict):
-        w = random.randint(self.min_size, min(img.width, self.max_size))
-        h = random.randint(self.min_size, min(img.height, self.max_size))
-        region = T.RandomCrop.get_params(img, [h, w])
-        return crop(img, target, region)
-
-
-class CenterCrop(object):
-    def __init__(self, size):
-        self.size = size
-
-    def __call__(self, img, target):
-        image_width, image_height = img.size
-        crop_height, crop_width = self.size
-        crop_top = int(round((image_height - crop_height) / 2.0))
-        crop_left = int(round((image_width - crop_width) / 2.0))
-        return crop(img, target, (crop_top, crop_left, crop_height, crop_width))
-
-
-class RandomHorizontalFlip(object):
-    def __init__(self, p=0.5):
-        self.p = p
-
-    def __call__(self, img, target):
-        if random.random() < self.p:
-            return hflip(img, target)
-        return img, target
-
-
-class RandomResize(object):
-    def __init__(self, sizes, max_size=None):
-        assert isinstance(sizes, (list, tuple))
-        self.sizes = sizes
-        self.max_size = max_size
-
-    def __call__(self, img, target=None):
-        size = random.choice(self.sizes)
-        return resize(img, target, size, self.max_size)
-
-
-class SquareResize(object):
-    def __init__(self, sizes):
-        assert isinstance(sizes, (list, tuple))
-        self.sizes = sizes
-
-    def __call__(self, img, target=None):
-        size = random.choice(self.sizes)
-        rescaled_img = F.resize(img, (size, size))
-        w, h = rescaled_img.size
-        if target is None:
-            return rescaled_img, None
-        ratios = tuple(
-            float(s) / float(s_orig) for s, s_orig in zip(rescaled_img.size, img.size)
-        )
-        ratio_width, ratio_height = ratios
-
-        target = target.copy()
-        if "boxes" in target:
-            boxes = target["boxes"]
-            scaled_boxes = boxes * torch.as_tensor(
-                [ratio_width, ratio_height, ratio_width, ratio_height]
-            )
-            target["boxes"] = scaled_boxes
-
-        if "area" in target:
-            area = target["area"]
-            scaled_area = area * (ratio_width * ratio_height)
-            target["area"] = scaled_area
-
-        target["size"] = torch.tensor([h, w])
-
-        if "masks" in target:
-            target["masks"] = (
-                interpolate(target["masks"][:, None].float(), (h, w), mode="nearest")[
-                    :, 0
-                ]
-                > 0.5
-            )
-
-        return rescaled_img, target
-
-
-class RandomPad(object):
-    def __init__(self, max_pad):
-        self.max_pad = max_pad
-
-    def __call__(self, img, target):
-        pad_x = random.randint(0, self.max_pad)
-        pad_y = random.randint(0, self.max_pad)
-        return pad(img, target, (pad_x, pad_y))
-
-
-class PILtoNdArray(object):
-    def __call__(self, img, target):
-        return np.asarray(img), target
-
-
-class NdArraytoPIL(object):
-    def __call__(self, img, target):
-        return F.to_pil_image(img.astype("uint8")), target
-
-
-class Pad(object):
-    def __init__(
-        self,
-        size=None,
-        size_divisor=32,
-        pad_mode=0,
-        offsets=None,
-        fill_value=(127.5, 127.5, 127.5),
-    ):
-        """
-        Pad image to a specified size or multiple of size_divisor.
-        Args:
-            size (int, Sequence): image target size, if None, pad to multiple of size_divisor, default None
-            size_divisor (int): size divisor, default 32
-            pad_mode (int): pad mode, currently only supports four modes [-1, 0, 1, 2]. if -1, use specified offsets
-                if 0, only pad to right and bottom. if 1, pad according to center. if 2, only pad left and top
-            offsets (list): [offset_x, offset_y], specify offset while padding, only supported pad_mode=-1
-            fill_value (bool): rgb value of pad area, default (127.5, 127.5, 127.5)
-        """
-
-        if not isinstance(size, (int, Sequence)):
-            raise TypeError(
-                "Type of target_size is invalid when random_size is True. \
-                            Must be List, now is {}".format(type(size))
-            )
-
-        if isinstance(size, int):
-            size = [size, size]
-
-        assert pad_mode in [-1, 0, 1, 2], (
-            "currently only supports four modes [-1, 0, 1, 2]"
-        )
-        if pad_mode == -1:
-            assert offsets, "if pad_mode is -1, offsets should not be None"
-
-        self.size = size
-        self.size_divisor = size_divisor
-        self.pad_mode = pad_mode
-        self.fill_value = fill_value
-        self.offsets = offsets
-
-    def apply_bbox(self, bbox, offsets):
-        return bbox + np.array(offsets * 2, dtype=np.float32)
-
-    def apply_image(self, image, offsets, im_size, size):
-        x, y = offsets
-        im_h, im_w = im_size
-        h, w = size
-        canvas = np.ones((h, w, 3), dtype=np.float32)
-        canvas *= np.array(self.fill_value, dtype=np.float32)
-        canvas[y : y + im_h, x : x + im_w, :] = image.astype(np.float32)
-        return canvas
-
-    def __call__(self, im, target):
-        im_h, im_w = im.shape[:2]
-        if self.size:
-            h, w = self.size
-            assert im_h <= h and im_w <= w, (
-                "(h, w) of target size should be greater than (im_h, im_w)"
-            )
-        else:
-            h = int(np.ceil(im_h / self.size_divisor) * self.size_divisor)
-            w = int(np.ceil(im_w / self.size_divisor) * self.size_divisor)
-
-        if h == im_h and w == im_w:
-            return im.astype(np.float32), target
-
-        if self.pad_mode == -1:
-            offset_x, offset_y = self.offsets
-        elif self.pad_mode == 0:
-            offset_y, offset_x = 0, 0
-        elif self.pad_mode == 1:
-            offset_y, offset_x = (h - im_h) // 2, (w - im_w) // 2
-        else:
-            offset_y, offset_x = h - im_h, w - im_w
-
-        offsets, im_size, size = [offset_x, offset_y], [im_h, im_w], [h, w]
-
-        im = self.apply_image(im, offsets, im_size, size)
-
-        if self.pad_mode == 0:
-            target["size"] = torch.tensor([h, w])
-            return im, target
-        if "boxes" in target and len(target["boxes"]) > 0:
-            boxes = np.asarray(target["boxes"])
-            target["boxes"] = torch.from_numpy(self.apply_bbox(boxes, offsets))
-            target["size"] = torch.tensor([h, w])
-
-        return im, target
-
-
-class RandomExpand(object):
-    """Random expand the canvas.
-    Args:
-        ratio (float): maximum expansion ratio.
-        prob (float): probability to expand.
-        fill_value (list): color value used to fill the canvas. in RGB order.
-    """
-
-    def __init__(self, ratio=4.0, prob=0.5, fill_value=(127.5, 127.5, 127.5)):
-        assert ratio > 1.01, "expand ratio must be larger than 1.01"
-        self.ratio = ratio
-        self.prob = prob
-        assert isinstance(fill_value, (Number, Sequence)), (
-            "fill value must be either float or sequence"
-        )
-        if isinstance(fill_value, Number):
-            fill_value = (fill_value,) * 3
-        if not isinstance(fill_value, tuple):
-            fill_value = tuple(fill_value)
-        self.fill_value = fill_value
-
-    def __call__(self, img, target):
-        if np.random.uniform(0.0, 1.0) < self.prob:
-            return img, target
-
-        height, width = img.shape[:2]
-        ratio = np.random.uniform(1.0, self.ratio)
-        h = int(height * ratio)
-        w = int(width * ratio)
-        if not h > height or not w > width:
-            return img, target
-        y = np.random.randint(0, h - height)
-        x = np.random.randint(0, w - width)
-        offsets, size = [x, y], [h, w]
-
-        pad = Pad(size, pad_mode=-1, offsets=offsets, fill_value=self.fill_value)
-
-        return pad(img, target)
-
-
-class RandomSelect(object):
-    """
-    Randomly selects between transforms1 and transforms2,
-    with probability p for transforms1 and (1 - p) for transforms2
-    """
-
-    def __init__(self, transforms1, transforms2, p=0.5):
-        self.transforms1 = transforms1
-        self.transforms2 = transforms2
-        self.p = p
-
-    def __call__(self, img, target):
-        if random.random() < self.p:
-            return self.transforms1(img, target)
-        return self.transforms2(img, target)
-
-
-class ToTensor(object):
-    def __call__(self, img, target):
-        return F.to_tensor(img), target
-
-
-class RandomErasing(object):
-    def __init__(self, *args, **kwargs):
-        self.eraser = T.RandomErasing(*args, **kwargs)
-
-    def __call__(self, img, target):
-        return self.eraser(img), target
 
 
 class Normalize(object):
@@ -681,15 +189,11 @@ def _build_albu_transform(name: str, params: Dict[str, Any]) -> A.BasicTransform
     if name in ALBUMENTATIONS_CONTAINERS:
         raw_nested = params.get("transforms", [])
         if not isinstance(raw_nested, list):
-            raise ValueError(
-                f"'{name}.transforms' must be a list, got {type(raw_nested).__name__}"
-            )
+            raise ValueError(f"'{name}.transforms' must be a list, got {type(raw_nested).__name__}")
         nested_transforms: List[A.BasicTransform] = []
         for entry in raw_nested:
             if not isinstance(entry, dict) or len(entry) != 1:
-                raise ValueError(
-                    f"Each nested transform entry must be a single-key dict, got {entry!r}"
-                )
+                raise ValueError(f"Each nested transform entry must be a single-key dict, got {entry!r}")
             nested_name, nested_params = next(iter(entry.items()))
             if not isinstance(nested_params, dict):
                 raise ValueError(
@@ -701,14 +205,10 @@ def _build_albu_transform(name: str, params: Dict[str, Any]) -> A.BasicTransform
         if name == "OneOf":
             if not nested_transforms:
                 raise ValueError("'OneOf' requires at least one transform")
-            other_params = {
-                k: v for k, v in params.items() if k not in ("transforms", "p")
-            }
+            other_params = {k: v for k, v in params.items() if k not in ("transforms", "p")}
             other_params["p"] = 1.0  # OneOf always fires; selection is via per-child p
         elif name == "Sequential":
-            other_params = {
-                k: v for k, v in params.items() if k not in ("transforms", "p")
-            }
+            other_params = {k: v for k, v in params.items() if k not in ("transforms", "p")}
             other_params["p"] = 1.0  # Sequential always runs all transforms
         else:
             other_params = {k: v for k, v in params.items() if k != "transforms"}
@@ -745,9 +245,7 @@ def _random_sized_crop_uses_size_param(aug_cls: type) -> bool:
     return "size" in signature.parameters
 
 
-def _normalize_albu_params(
-    name: str, params: Dict[str, Any], aug_cls: type
-) -> Dict[str, Any]:
+def _normalize_albu_params(name: str, params: Dict[str, Any], aug_cls: type) -> Dict[str, Any]:
     """Normalize transform params across Albumentations API variations.
 
     Currently this adapts ``RandomSizedCrop`` arguments so a config using
@@ -885,10 +383,7 @@ class AlbumentationsWrapper:
                 [transform],
                 bbox_params=A.BboxParams(
                     format="pascal_voc",  # Boxes are in (x1, y1, x2, y2) format
-                    label_fields=[
-                        "category_ids",
-                        "idxs",
-                    ],  # Track labels and indices for per-instance field sync
+                    label_fields=["category_ids", "idxs"],  # Track labels and indices for per-instance field sync
                     min_visibility=0.0,  # Remove boxes with zero visibility/area after transformation
                     clip=True,  # Clip box coordinates to image boundaries after transformation
                 ),
@@ -917,9 +412,7 @@ class AlbumentationsWrapper:
             return object.__repr__(self)
 
         transform_type = "geometric" if self._is_geometric else "pixel-level"
-        return (
-            f"{self.__class__.__name__}(transform={transform}, type={transform_type})"
-        )
+        return f"{self.__class__.__name__}(transform={transform}, type={transform_type})"
 
     @staticmethod
     def _boxes_to_numpy(boxes: Union[torch.Tensor, np.ndarray]) -> np.ndarray:
@@ -936,9 +429,7 @@ class AlbumentationsWrapper:
         return boxes_np
 
     @staticmethod
-    def _clear_per_instance_fields(
-        target: Dict[str, Any], num_boxes: int
-    ) -> Dict[str, Any]:
+    def _clear_per_instance_fields(target: Dict[str, Any], num_boxes: int) -> Dict[str, Any]:
         """Clear all per-instance fields when no boxes remain.
 
         >>> import torch
@@ -963,9 +454,7 @@ class AlbumentationsWrapper:
         return result
 
     @staticmethod
-    def _filter_per_instance_fields(
-        target: Dict[str, Any], num_boxes: int, kept_idxs: List[int]
-    ) -> Dict[str, Any]:
+    def _filter_per_instance_fields(target: Dict[str, Any], num_boxes: int, kept_idxs: List[int]) -> Dict[str, Any]:
         """Filter per-instance fields to match kept box indices.
 
         >>> import torch
@@ -1019,8 +508,11 @@ class AlbumentationsWrapper:
         num_boxes = boxes_np.shape[0]
         # Track indices to keep per-instance fields synchronized
         idxs = list(range(num_boxes))
+
         masks_list = None
         keypoints_list = None
+        K = None  # number of keypoints per instance
+
         if "masks" in target:
             masks = target["masks"]
             masks_np = (
@@ -1032,6 +524,7 @@ class AlbumentationsWrapper:
                 )
             masks_np = masks_np.astype(np.uint8, copy=False)
             masks_list = [mask for mask in masks_np]
+
         if "keypoints" in target:
             keypoints = target["keypoints"]
             keypoints_np = (
@@ -1041,21 +534,33 @@ class AlbumentationsWrapper:
                 raise ValueError(
                     f"keypoints must have shape (N, K, 3), got {keypoints_np.shape}"
                 )
-            # Convert normalized keypoints to pixel coordinates for Albumentations
-            orig_h, orig_w = target.get("orig_size", target.get("size", [image_np.shape[0], image_np.shape[1]]))
-            # Convert tensors to scalars if needed (keypoints_pixel is numpy)
+
+            orig_size = target.get(
+                "orig_size",
+                target.get("size", [image_np.shape[0], image_np.shape[1]])
+            )
+
+            if torch.is_tensor(orig_size):
+                orig_size = orig_size.tolist()
+
+            orig_h, orig_w = orig_size
+
             if torch.is_tensor(orig_h):
                 orig_h = orig_h.item()
             if torch.is_tensor(orig_w):
                 orig_w = orig_w.item()
+
+            orig_h = float(orig_h)
+            orig_w = float(orig_w)
+
             keypoints_pixel = keypoints_np.copy()
-            keypoints_pixel[..., 0] *= orig_w  # x coordinates
-            keypoints_pixel[..., 1] *= orig_h  # y coordinates
-            keypoints_list = keypoints_pixel.reshape(-1, 3).tolist()  # Albumentations expects list of (x, y, visibility)
-        # Filter out degenerate boxes (zero-width or zero-height) before passing to
-        # Albumentations. Such boxes arise when an annotation sits exactly on or beyond
-        # the image boundary so that x_min == x_max (or y_min == y_max) after clipping.
-        # Albumentations' check_bboxes would raise ValueError for these inputs.
+            keypoints_pixel[..., 0] *= orig_w
+            keypoints_pixel[..., 1] *= orig_h
+
+            N, K, _ = keypoints_pixel.shape
+            keypoints_list = keypoints_pixel.reshape(N * K, 3).tolist()
+
+        # Filter degenerate boxes
         if num_boxes > 0:
             valid_mask = (boxes_np[:, 2] > boxes_np[:, 0]) & (
                 boxes_np[:, 3] > boxes_np[:, 1]
@@ -1064,24 +569,29 @@ class AlbumentationsWrapper:
                 valid_positions = np.where(valid_mask)[0].tolist()
                 boxes_np = boxes_np[valid_mask]
                 labels = [labels[i] for i in valid_positions]
-                # idxs carries original indices so downstream _filter_per_instance_fields
-                # can correctly slice fields from the un-filtered target.
                 idxs = [idxs[i] for i in valid_positions]
+
+                # ✅ FIX: keep keypoints aligned with filtered boxes
                 if keypoints_list is not None:
-                    # Filter keypoints to match valid boxes
-                    keypoints_list = [keypoints_list[i] for i in valid_positions]
-        # Apply transform
+                    keypoints_pixel = keypoints_pixel[valid_mask]
+                    N = keypoints_pixel.shape[0]
+                    keypoints_list = keypoints_pixel.reshape(N * K, 3).tolist()
+
         transform_kwargs = {
             "image": image_np,
             "bboxes": boxes_np,
             "category_ids": labels,
             "idxs": idxs,
         }
+
         if masks_list is not None and len(masks_list) > 0:
             transform_kwargs["masks"] = masks_list
+
         if keypoints_list is not None and len(keypoints_list) > 0:
             transform_kwargs["keypoints"] = keypoints_list
+
         augmented = self.transform(**transform_kwargs)
+
         target_out: Dict[str, Any] = target.copy()
         bboxes_aug = augmented["bboxes"]
         kept_idxs = augmented.get("idxs", idxs)
@@ -1098,53 +608,73 @@ class AlbumentationsWrapper:
                 )
             # Clear keypoints
             if "keypoints" in target:
-                target_out["keypoints"] = torch.zeros((0, target["keypoints"].shape[1], 3), dtype=torch.float32)
+                target_out["keypoints"] = torch.zeros(
+                    (0, target["keypoints"].shape[1], 3), dtype=torch.float32
+                )
+
         else:
             target_out["boxes"] = torch.as_tensor(
                 bboxes_aug, dtype=torch.float32
             ).reshape(-1, 4)
+
             target_out["labels"] = torch.tensor(
                 augmented["category_ids"], dtype=torch.long
             )
+
             target_out.update(
                 self._filter_per_instance_fields(target, num_boxes, kept_idxs)
             )
-            # Recompute area from the transformed box coordinates so it stays consistent with
-            # the new image scale (e.g. after resize the original COCO area values are stale).
+
             if "area" in target_out:
                 boxes = target_out["boxes"]
                 target_out["area"] = (boxes[:, 2] - boxes[:, 0]) * (
                     boxes[:, 3] - boxes[:, 1]
                 )
+
         image_out = Image.fromarray(augmented["image"])
+
         if masks_list is not None and "masks" in augmented:
             height, width = augmented["image"].shape[:2]
             masks_aug = augmented["masks"]
             masks_aug = [masks_aug[int(i)] for i in kept_idxs]
+
             if len(masks_aug) == 0:
                 target_out["masks"] = torch.zeros((0, height, width), dtype=torch.bool)
             else:
                 target_out["masks"] = torch.as_tensor(
                     np.stack(masks_aug), dtype=torch.bool
                 )
+
         if keypoints_list is not None and "keypoints" in augmented:
             height, width = augmented["image"].shape[:2]
             keypoints_aug = augmented["keypoints"]
-            # Albumentations returns keypoints as flat list, need to reshape
-            keypoints_aug = np.array(keypoints_aug).reshape(-1, 3)
-            # Filter to kept instances
-            if len(kept_idxs) > 0:
-                keypoints_aug = keypoints_aug[kept_idxs]
+
+            keypoints_aug = np.array(keypoints_aug, dtype=np.float32)
+
+            # ✅ FIX: define before condition
+            num_instances = len(augmented["bboxes"])
+
+            if len(keypoints_aug) > 0 and num_instances > 0:
+                expected = num_instances * K
+
+                if len(keypoints_aug) == expected:
+                    keypoints_aug = keypoints_aug.reshape(num_instances, K, 3)
+                    keypoints_aug = keypoints_aug[kept_idxs]
+                else:
+                    keypoints_aug = np.zeros((0, K, 3), dtype=np.float32)
             else:
-                keypoints_aug = np.zeros((0, 3), dtype=np.float32)
-            # Convert back to normalized coordinates
-            keypoints_aug = keypoints_aug.astype(np.float32)
-            keypoints_aug[:, 0] /= width   # x coordinates
-            keypoints_aug[:, 1] /= height  # y coordinates
-            # Clamp to valid range
-            keypoints_aug[:, 0] = np.clip(keypoints_aug[:, 0], 0, 1)
-            keypoints_aug[:, 1] = np.clip(keypoints_aug[:, 1], 0, 1)
-            target_out["keypoints"] = torch.as_tensor(keypoints_aug, dtype=torch.float32)
+                keypoints_aug = np.zeros((0, K, 3), dtype=np.float32)
+
+            keypoints_aug[..., 0] /= width
+            keypoints_aug[..., 1] /= height
+
+            keypoints_aug[..., 0] = np.clip(keypoints_aug[..., 0], 0, 1)
+            keypoints_aug[..., 1] = np.clip(keypoints_aug[..., 1], 0, 1)
+
+            target_out["keypoints"] = torch.as_tensor(
+                keypoints_aug, dtype=torch.float32
+            )
+
         return image_out, target_out
 
     def __call__(
@@ -1196,9 +726,7 @@ class AlbumentationsWrapper:
             image_np = np.array(image)
             if self._is_geometric:
                 # Geometric A.Compose requires label_fields even when there are no boxes
-                augmented = self.transform(
-                    image=image_np, bboxes=[], category_ids=[], idxs=[]
-                )
+                augmented = self.transform(image=image_np, bboxes=[], category_ids=[], idxs=[])
             else:
                 augmented = self.transform(image=image_np)
             return Image.fromarray(augmented["image"]), None
@@ -1214,11 +742,7 @@ class AlbumentationsWrapper:
         image_np = np.array(image)
 
         # Convert labels tensor to Python list (required by Albumentations category_ids)
-        labels = (
-            target["labels"].cpu().tolist()
-            if torch.is_tensor(target["labels"])
-            else list(target["labels"])
-        )
+        labels = target["labels"].cpu().tolist() if torch.is_tensor(target["labels"]) else list(target["labels"])
 
         # === Apply Transform ===
         if self._is_geometric and "masks" in target and "boxes" not in target:
@@ -1228,9 +752,7 @@ class AlbumentationsWrapper:
             )
         if self._is_geometric and "boxes" in target:
             # Geometric path: transform image and boxes together
-            image_out, target_out = self._apply_geometric_transform(
-                image_np, target, labels
-            )
+            image_out, target_out = self._apply_geometric_transform(image_np, target, labels)
         else:
             # Non-geometric path: transform image only
             augmented = self.transform(image=image_np)
@@ -1316,14 +838,10 @@ class AlbumentationsWrapper:
         elif isinstance(config_dict, dict):
             entries = [{k: v} for k, v in config_dict.items()]
         else:
-            raise TypeError(
-                f"config_dict must be a dictionary or list, got {type(config_dict)}"
-            )
+            raise TypeError(f"config_dict must be a dictionary or list, got {type(config_dict)}")
 
         if not entries:
-            logger.warning(
-                "Empty augmentation config provided, no transforms will be applied"
-            )
+            logger.warning("Empty augmentation config provided, no transforms will be applied")
             return []
 
         transforms = []
