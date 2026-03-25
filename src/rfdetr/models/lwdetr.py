@@ -509,7 +509,7 @@ def build_model(args: "BuilderArgs"):
     keypoint_head = (
         KeypointHead(
             args.hidden_dim,
-            num_layers=3,
+            num_keypoints=args.num_keypoints,
         )
         if getattr(args, "keypoint_head", False)
         else None
