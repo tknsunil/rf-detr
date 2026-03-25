@@ -1043,6 +1043,11 @@ class AlbumentationsWrapper:
                 )
             # Convert normalized keypoints to pixel coordinates for Albumentations
             orig_h, orig_w = target.get("orig_size", target.get("size", [image_np.shape[0], image_np.shape[1]]))
+            # Convert tensors to scalars if needed (keypoints_pixel is numpy)
+            if torch.is_tensor(orig_h):
+                orig_h = orig_h.item()
+            if torch.is_tensor(orig_w):
+                orig_w = orig_w.item()
             keypoints_pixel = keypoints_np.copy()
             keypoints_pixel[..., 0] *= orig_w  # x coordinates
             keypoints_pixel[..., 1] *= orig_h  # y coordinates
