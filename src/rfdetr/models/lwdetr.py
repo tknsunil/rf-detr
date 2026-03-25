@@ -46,6 +46,7 @@ from rfdetr.models.criterion import (  # noqa: F401 — backward compat
     sigmoid_varifocal_loss,
 )
 from rfdetr.models.heads.segmentation import SegmentationHead
+from rfdetr.models.keypoint_head import KeypointHead
 from rfdetr.models.matcher import build_matcher
 from rfdetr.models.math import MLP
 from rfdetr.models.postprocess import PostProcess
@@ -68,17 +69,20 @@ class LWDETR(nn.Module):
         two_stage=False,
         lite_refpoint_refine=False,
         bbox_reparam=False,
+        keypoint_head=None,
     ):
         """Initializes the model.
         Parameters:
             backbone: torch module of the backbone to be used. See backbone.py
             transformer: torch module of the transformer architecture. See transformer.py
+            segmentation_head: optional segmentation head for instance masks
             num_classes: number of object classes
             num_queries: number of object queries, ie detection slot. This is the maximal number of objects
                          Conditional DETR can detect in a single image. For COCO, we recommend 100 queries.
             aux_loss: True if auxiliary decoding losses (loss at each decoder layer) are to be used.
             group_detr: Number of groups to speed detr training. Default is 1.
             lite_refpoint_refine: TODO
+            keypoint_head: optional keypoint head for pose estimation
         """
         super().__init__()
         self.num_queries = num_queries
@@ -87,6 +91,7 @@ class LWDETR(nn.Module):
         self.class_embed = nn.Linear(hidden_dim, num_classes)
         self.bbox_embed = MLP(hidden_dim, hidden_dim, 4, 3)
         self.segmentation_head = segmentation_head
+        self.keypoint_head = keypoint_head
 
         query_dim = 4
         self.refpoint_embed = nn.Embedding(num_queries * group_detr, query_dim)
@@ -234,14 +239,24 @@ class LWDETR(nn.Module):
                     features[0].tensors, hs, samples.tensors.shape[-2:]
                 )
 
+            # Keypoint prediction: outputs (x, y, visibility) for each keypoint
+            outputs_keypoints = None
+            if self.keypoint_head is not None:
+                outputs_keypoints = self.keypoint_head(
+                    hs, reference_boxes=outputs_coord[-1]
+                )
+
             out = {"pred_logits": outputs_class[-1], "pred_boxes": outputs_coord[-1]}
             if self.segmentation_head is not None:
                 out["pred_masks"] = outputs_masks[-1]
+            if self.keypoint_head is not None:
+                out["pred_keypoints"] = outputs_keypoints[-1]
             if self.aux_loss:
                 out["aux_outputs"] = self._set_aux_loss(
                     outputs_class,
                     outputs_coord,
                     outputs_masks if self.segmentation_head is not None else None,
+                    outputs_keypoints if self.keypoint_head is not None else None,
                 )
 
         if self.two_stage:
@@ -288,6 +303,7 @@ class LWDETR(nn.Module):
         )
 
         outputs_masks = None
+        outputs_keypoints = None
 
         if hs is not None:
             if self.bbox_reparam:
@@ -313,6 +329,10 @@ class LWDETR(nn.Module):
                     ],
                     tensors.shape[-2:],
                 )[0]
+            if self.keypoint_head is not None:
+                outputs_keypoints = self.keypoint_head(
+                    [hs[-1]], reference_boxes=outputs_coord[-1]
+                )[0]
         else:
             assert self.two_stage, "if not using decoder, two_stage must be True"
             outputs_class = self.transformer.enc_out_class_embed[0](hs_enc)
@@ -326,29 +346,50 @@ class LWDETR(nn.Module):
                     tensors.shape[-2:],
                     skip_blocks=True,
                 )[0]
+            if self.keypoint_head is not None:
+                outputs_keypoints = self.keypoint_head(
+                    [hs_enc], reference_boxes=ref_enc
+                )[0]
 
+        results = []
+        results.append(outputs_coord)
+        results.append(outputs_class)
         if outputs_masks is not None:
-            return outputs_coord, outputs_class, outputs_masks
-        else:
-            return outputs_coord, outputs_class
+            results.append(outputs_masks)
+        if outputs_keypoints is not None:
+            results.append(outputs_keypoints)
+        return tuple(results)
 
     @torch.jit.unused
-    def _set_aux_loss(self, outputs_class, outputs_coord, outputs_masks):
+    def _set_aux_loss(
+        self, outputs_class, outputs_coord, outputs_masks, outputs_keypoints=None
+    ):
         # this is a workaround to make torchscript happy, as torchscript
         # doesn't support dictionary with non-homogeneous values, such
         # as a dict having both a Tensor and a list.
         if outputs_masks is not None:
-            return [
-                {"pred_logits": a, "pred_boxes": b, "pred_masks": c}
-                for a, b, c in zip(
-                    outputs_class[:-1], outputs_coord[:-1], outputs_masks[:-1]
-                )
-            ]
+            aux_outputs = []
+            for i in range(len(outputs_class[:-1])):
+                aux_dict = {
+                    "pred_logits": outputs_class[i],
+                    "pred_boxes": outputs_coord[i],
+                    "pred_masks": outputs_masks[i],
+                }
+                if outputs_keypoints is not None:
+                    aux_dict["pred_keypoints"] = outputs_keypoints[i]
+                aux_outputs.append(aux_dict)
+            return aux_outputs
         else:
-            return [
-                {"pred_logits": a, "pred_boxes": b}
-                for a, b in zip(outputs_class[:-1], outputs_coord[:-1])
-            ]
+            aux_outputs = []
+            for i in range(len(outputs_class[:-1])):
+                aux_dict = {
+                    "pred_logits": outputs_class[i],
+                    "pred_boxes": outputs_coord[i],
+                }
+                if outputs_keypoints is not None:
+                    aux_dict["pred_keypoints"] = outputs_keypoints[i]
+                aux_outputs.append(aux_dict)
+            return aux_outputs
 
     def _get_backbone_encoder_layers(self) -> Optional[nn.ModuleList]:
         """Resolve the list of transformer blocks/layers from backbone[0].encoder.
@@ -465,6 +506,15 @@ def build_model(args: "BuilderArgs"):
         else None
     )
 
+    keypoint_head = (
+        KeypointHead(
+            args.hidden_dim,
+            num_layers=3,
+        )
+        if getattr(args, "keypoint_head", False)
+        else None
+    )
+
     model = LWDETR(
         backbone,
         transformer,
@@ -476,6 +526,7 @@ def build_model(args: "BuilderArgs"):
         two_stage=args.two_stage,
         lite_refpoint_refine=args.lite_refpoint_refine,
         bbox_reparam=args.bbox_reparam,
+        keypoint_head=keypoint_head,
     )
     return model
 
@@ -488,6 +539,13 @@ def build_criterion_and_postprocessors(args: "BuilderArgs"):
     if args.segmentation_head:
         weight_dict["loss_mask_ce"] = args.mask_ce_loss_coef
         weight_dict["loss_mask_dice"] = args.mask_dice_loss_coef
+    # Add keypoint loss weights if keypoint head is enabled
+    if getattr(args, "keypoint_head", False):
+        weight_dict["loss_keypoints_l1"] = getattr(args, "keypoint_loss_coef", 5.0)
+        weight_dict["loss_keypoints_vis"] = getattr(
+            args, "keypoint_visibility_loss_coef", 2.0
+        )
+        weight_dict["loss_keypoints_oks"] = getattr(args, "keypoint_oks_loss_coef", 2.0)
     # TODO this is a hack
     if args.aux_loss:
         aux_weight_dict = {}
@@ -500,6 +558,8 @@ def build_criterion_and_postprocessors(args: "BuilderArgs"):
     losses = ["labels", "boxes", "cardinality"]
     if args.segmentation_head:
         losses.append("masks")
+    if getattr(args, "keypoint_head", False):
+        losses.append("keypoints")
 
     sum_group_losses = getattr(args, "sum_group_losses", False)
     if args.segmentation_head:

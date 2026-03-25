@@ -11,19 +11,6 @@ from rfdetr.models.heads.segmentation import (
     MLPBlock,
     SegmentationHead,
 )
-from rfdetr.detr import (
-    RFDETRBase,
-    RFDETRLarge,
-    RFDETRNano,
-    RFDETRSmall,
-    RFDETRMedium,
-    RFDETRSegPreview,
-    RFDETRPose,
-    RFDETRPoseNano,
-    RFDETRPoseSmall,
-    RFDETRPoseMedium,
-    RFDETRPoseLarge,
-)
 
 __all__ = [
     "SegmentationHead",
