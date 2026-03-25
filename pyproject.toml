@@ -36,8 +36,8 @@ keywords = ["machine-learning", "deep-learning", "vision", "ML", "DL", "AI", "DE
 
 dependencies = [
     "requests",                        # weight download from remote URLs
-    "torch==2.11.0+cpu",                    # core tensor ops and model forward pass
-    "torchvision==0.26.0+cpu",             # image transforms and ops (aligned with torch>=2.2.0)
+    "torch>=2.2.0",                    # core tensor ops and model forward pass
+    "torchvision>=0.17.0",             # image transforms and ops (aligned with torch>=2.2.0)
     "tqdm",                            # progress bars during weight download
     "transformers>=5.1.0,<6.0.0",     # DINOv2 backbone loading
     "pydantic>=2.0,<3",               # ModelConfig / TrainConfig validation
@@ -136,10 +136,3 @@ include-package-data = false
 
 [tool.setuptools.package-data]
 rfdetr = ["py.typed", "models/backbone/dinov2_configs/*.json"]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-pythonpath = ["."]
-markers = [
-    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
-]
