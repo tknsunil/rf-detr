@@ -387,6 +387,11 @@ class AlbumentationsWrapper:
                     min_visibility=0.0,  # Remove boxes with zero visibility/area after transformation
                     clip=True,  # Clip box coordinates to image boundaries after transformation
                 ),
+                keypoint_params=A.KeypointParams(
+                    format="xy",  # Keypoints are in (x, y) format
+                    label_fields=["keypoint_visibilities"],  # Track visibility for per-keypoint field sync
+                    remove_invisible=False,  # Keep keypoints even if they go out of bounds
+                ),
             )
         else:
             # Wrap non-geometric transform without bbox handling
@@ -563,7 +568,12 @@ class AlbumentationsWrapper:
             keypoints_pixel[..., 1] *= orig_h
 
             N, K, _ = keypoints_pixel.shape
-            keypoints_list = keypoints_pixel.reshape(N * K, 3)
+            # Convert to list of (x, y) tuples - visibility is tracked separately via keypoint_params
+            keypoints_list = [
+                tuple(pt) for pt in keypoints_pixel.reshape(N * K, 2).astype(np.float32)
+            ]
+            # Store visibility separately for label_fields in albumentations
+            keypoint_visibilities = keypoints_pixel.reshape(N * K, 3)[:, 2].tolist()
 
         # Filter degenerate boxes
         if num_boxes > 0:
@@ -580,7 +590,11 @@ class AlbumentationsWrapper:
                 if keypoints_list is not None:
                     keypoints_pixel = keypoints_pixel[valid_mask]
                     N = keypoints_pixel.shape[0]
-                    keypoints_list = keypoints_pixel.reshape(N * K, 3)
+                    # Re-create keypoints list with filtered data
+                    keypoints_list = [
+                        tuple(pt) for pt in keypoints_pixel.reshape(N * K, 2).astype(np.float32)
+                    ]
+                    keypoint_visibilities = keypoints_pixel.reshape(N * K, 3)[:, 2].tolist()
 
         transform_kwargs = {
             "image": image_np,
@@ -594,6 +608,7 @@ class AlbumentationsWrapper:
 
         if keypoints_list is not None and len(keypoints_list) > 0:
             transform_kwargs["keypoints"] = keypoints_list
+            transform_kwargs["keypoint_visibilities"] = keypoint_visibilities
 
         augmented = self.transform(**transform_kwargs)
 
@@ -653,6 +668,7 @@ class AlbumentationsWrapper:
         if keypoints_list is not None and "keypoints" in augmented:
             height, width = augmented["image"].shape[:2]
             keypoints_aug = augmented["keypoints"]
+            visibilities_aug = augmented.get("keypoint_visibilities", [])
 
             keypoints_aug = np.array(keypoints_aug, dtype=np.float32)
 
@@ -660,13 +676,15 @@ class AlbumentationsWrapper:
             num_instances = len(augmented["bboxes"])
 
             if len(keypoints_aug) > 0 and num_instances > 0:
-                expected = num_instances * K
-
-                if len(keypoints_aug) == expected:
-                    keypoints_aug = keypoints_aug.reshape(num_instances, K, 3)
-                    keypoints_aug = keypoints_aug[kept_idxs]
-                else:
-                    keypoints_aug = np.zeros((0, K, 3), dtype=np.float32)
+                # Reshape to (num_instances, K, 2) for xy coordinates
+                keypoints_aug = keypoints_aug.reshape(num_instances, K, 2)
+                keypoints_aug = keypoints_aug[kept_idxs]
+                # Recombine with visibility from label_fields
+                visibilities_aug = np.array(visibilities_aug, dtype=np.float32).reshape(num_instances, K)
+                visibilities_aug = visibilities_aug[kept_idxs]
+                # Concatenate xy with visibility to get (N, K, 3)
+                keypoints_aug = np.concatenate([keypoints_aug, visibilities_aug[..., np.newaxis]], axis=2)
+                
             else:
                 keypoints_aug = np.zeros((0, K, 3), dtype=np.float32)
 
