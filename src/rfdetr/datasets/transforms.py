@@ -189,11 +189,15 @@ def _build_albu_transform(name: str, params: Dict[str, Any]) -> A.BasicTransform
     if name in ALBUMENTATIONS_CONTAINERS:
         raw_nested = params.get("transforms", [])
         if not isinstance(raw_nested, list):
-            raise ValueError(f"'{name}.transforms' must be a list, got {type(raw_nested).__name__}")
+            raise ValueError(
+                f"'{name}.transforms' must be a list, got {type(raw_nested).__name__}"
+            )
         nested_transforms: List[A.BasicTransform] = []
         for entry in raw_nested:
             if not isinstance(entry, dict) or len(entry) != 1:
-                raise ValueError(f"Each nested transform entry must be a single-key dict, got {entry!r}")
+                raise ValueError(
+                    f"Each nested transform entry must be a single-key dict, got {entry!r}"
+                )
             nested_name, nested_params = next(iter(entry.items()))
             if not isinstance(nested_params, dict):
                 raise ValueError(
@@ -205,10 +209,14 @@ def _build_albu_transform(name: str, params: Dict[str, Any]) -> A.BasicTransform
         if name == "OneOf":
             if not nested_transforms:
                 raise ValueError("'OneOf' requires at least one transform")
-            other_params = {k: v for k, v in params.items() if k not in ("transforms", "p")}
+            other_params = {
+                k: v for k, v in params.items() if k not in ("transforms", "p")
+            }
             other_params["p"] = 1.0  # OneOf always fires; selection is via per-child p
         elif name == "Sequential":
-            other_params = {k: v for k, v in params.items() if k not in ("transforms", "p")}
+            other_params = {
+                k: v for k, v in params.items() if k not in ("transforms", "p")
+            }
             other_params["p"] = 1.0  # Sequential always runs all transforms
         else:
             other_params = {k: v for k, v in params.items() if k != "transforms"}
@@ -245,7 +253,9 @@ def _random_sized_crop_uses_size_param(aug_cls: type) -> bool:
     return "size" in signature.parameters
 
 
-def _normalize_albu_params(name: str, params: Dict[str, Any], aug_cls: type) -> Dict[str, Any]:
+def _normalize_albu_params(
+    name: str, params: Dict[str, Any], aug_cls: type
+) -> Dict[str, Any]:
     """Normalize transform params across Albumentations API variations.
 
     Currently this adapts ``RandomSizedCrop`` arguments so a config using
@@ -383,13 +393,18 @@ class AlbumentationsWrapper:
                 [transform],
                 bbox_params=A.BboxParams(
                     format="pascal_voc",  # Boxes are in (x1, y1, x2, y2) format
-                    label_fields=["category_ids", "idxs"],  # Track labels and indices for per-instance field sync
+                    label_fields=[
+                        "category_ids",
+                        "idxs",
+                    ],  # Track labels and indices for per-instance field sync
                     min_visibility=0.0,  # Remove boxes with zero visibility/area after transformation
                     clip=True,  # Clip box coordinates to image boundaries after transformation
                 ),
                 keypoint_params=A.KeypointParams(
                     format="xy",  # Keypoints are in (x, y) format
-                    label_fields=["keypoint_visibilities"],  # Track visibility for per-keypoint field sync
+                    label_fields=[
+                        "keypoint_visibilities"
+                    ],  # Track visibility for per-keypoint field sync
                     remove_invisible=False,  # Keep keypoints even if they go out of bounds
                 ),
             )
@@ -417,7 +432,9 @@ class AlbumentationsWrapper:
             return object.__repr__(self)
 
         transform_type = "geometric" if self._is_geometric else "pixel-level"
-        return f"{self.__class__.__name__}(transform={transform}, type={transform_type})"
+        return (
+            f"{self.__class__.__name__}(transform={transform}, type={transform_type})"
+        )
 
     @staticmethod
     def _boxes_to_numpy(boxes: Union[torch.Tensor, np.ndarray]) -> np.ndarray:
@@ -434,7 +451,9 @@ class AlbumentationsWrapper:
         return boxes_np
 
     @staticmethod
-    def _clear_per_instance_fields(target: Dict[str, Any], num_boxes: int) -> Dict[str, Any]:
+    def _clear_per_instance_fields(
+        target: Dict[str, Any], num_boxes: int
+    ) -> Dict[str, Any]:
         """Clear all per-instance fields when no boxes remain.
 
         >>> import torch
@@ -459,7 +478,9 @@ class AlbumentationsWrapper:
         return result
 
     @staticmethod
-    def _filter_per_instance_fields(target: Dict[str, Any], num_boxes: int, kept_idxs: List[int]) -> Dict[str, Any]:
+    def _filter_per_instance_fields(
+        target: Dict[str, Any], num_boxes: int, kept_idxs: List[int]
+    ) -> Dict[str, Any]:
         """Filter per-instance fields to match kept box indices.
 
         >>> import torch
@@ -531,14 +552,11 @@ class AlbumentationsWrapper:
             masks_list = [mask for mask in masks_np]
 
         if "keypoints" in target:
-            try:
-                print("Keypoints", type(target["keypoints"]), target["keypoints"].shape)
-            except Exception:
-                pass
-
             keypoints = target["keypoints"]
             keypoints_np = (
-                keypoints.cpu().numpy() if torch.is_tensor(keypoints) else np.array(keypoints)
+                keypoints.cpu().numpy()
+                if torch.is_tensor(keypoints)
+                else np.array(keypoints)
             )
             if keypoints_np.ndim != 3:
                 raise ValueError(
@@ -546,8 +564,7 @@ class AlbumentationsWrapper:
                 )
 
             orig_size = target.get(
-                "orig_size",
-                target.get("size", [image_np.shape[0], image_np.shape[1]])
+                "orig_size", target.get("size", [image_np.shape[0], image_np.shape[1]])
             )
 
             if torch.is_tensor(orig_size):
@@ -568,9 +585,6 @@ class AlbumentationsWrapper:
             keypoints_pixel[..., 1] *= orig_h
 
             N, K, C = keypoints_pixel.shape
-            # DEBUG: Log keypoints shape to diagnose reshape issues
-            print(f"[DEBUG] keypoints_pixel shape: {keypoints_pixel.shape}, N={N}, K={K}, C={C}, total={keypoints_pixel.size}")
-            print(f"[DEBUG] Attempting reshape to (N*K, 2) = ({N*K}, 2) which requires {N*K*2} elements")
             # Convert to list of (x, y) tuples - visibility is tracked separately via keypoint_params
             # First reshape to (N, K, 2) to extract only x,y (ignoring visibility), then flatten to list
             keypoints_xy = keypoints_pixel[..., :2]  # Shape: (N, K, 2)
@@ -598,9 +612,12 @@ class AlbumentationsWrapper:
                     # Re-create keypoints list with filtered data (using same fix as above)
                     keypoints_xy = keypoints_pixel[..., :2]  # Shape: (N, K, 2)
                     keypoints_list = [
-                        tuple(pt) for pt in keypoints_xy.reshape(N * K, 2).astype(np.float32)
+                        tuple(pt)
+                        for pt in keypoints_xy.reshape(N * K, 2).astype(np.float32)
                     ]
-                    keypoint_visibilities = keypoints_pixel[..., 2].reshape(N * K).tolist()
+                    keypoint_visibilities = (
+                        keypoints_pixel[..., 2].reshape(N * K).tolist()
+                    )
 
         transform_kwargs = {
             "image": image_np,
@@ -623,7 +640,6 @@ class AlbumentationsWrapper:
         kept_idxs = augmented.get("idxs", idxs)
         # Convert kept_idxs to numpy array with integer dtype for advanced indexing
         kept_idxs = np.asarray(kept_idxs, dtype=np.int64)
-        logger.info(f"kept_idxs type: {type(kept_idxs)}, value: {kept_idxs}")
         # Update target with transformed boxes and labels
         if len(bboxes_aug) == 0:
             target_out["boxes"] = torch.zeros((0, 4), dtype=torch.float32)
@@ -681,21 +697,32 @@ class AlbumentationsWrapper:
 
             keypoints_aug = np.array(keypoints_aug, dtype=np.float32)
 
-            # ✅ FIX: define before condition
-            num_instances = len(augmented["bboxes"])
+            # ✅ FIX: Compute num_instances from keypoints data, not boxes
+            # Albumentations may filter keypoints and boxes differently, so using
+            # len(augmented["bboxes"]) can cause shape mismatches
+            actual_keypoint_count = len(keypoints_aug)  # Total elements = N * K * 2
+            num_instances = actual_keypoint_count // (K * 2) if K > 0 else 0
 
-            if len(keypoints_aug) > 0 and num_instances > 0:
+            if (
+                actual_keypoint_count > 0
+                and actual_keypoint_count % (K * 2) == 0
+                and len(visibilities_aug) > 0
+                and len(visibilities_aug) == actual_keypoint_count // 2
+                and num_instances > 0
+            ):
                 # Reshape to (num_instances, K, 2) for xy coordinates
                 keypoints_aug = keypoints_aug.reshape(num_instances, K, 2)
-                # DEBUG: Log shapes and kept_idxs type before indexing
-                logger.info(f"Before indexing: keypoints_aug.shape={keypoints_aug.shape}, kept_idxs type={type(kept_idxs)}, kept_idxs={kept_idxs}")
                 keypoints_aug = keypoints_aug[kept_idxs]
                 # Recombine with visibility from label_fields
-                visibilities_aug = np.array(visibilities_aug, dtype=np.float32).reshape(num_instances, K)
+                visibilities_aug = np.array(visibilities_aug, dtype=np.float32).reshape(
+                    num_instances, K
+                )
                 visibilities_aug = visibilities_aug[kept_idxs]
                 # Concatenate xy with visibility to get (N, K, 3)
-                keypoints_aug = np.concatenate([keypoints_aug, visibilities_aug[..., np.newaxis]], axis=2)
-                
+                keypoints_aug = np.concatenate(
+                    [keypoints_aug, visibilities_aug[..., np.newaxis]], axis=2
+                )
+
             else:
                 keypoints_aug = np.zeros((0, K, 3), dtype=np.float32)
 
@@ -760,7 +787,9 @@ class AlbumentationsWrapper:
             image_np = np.array(image)
             if self._is_geometric:
                 # Geometric A.Compose requires label_fields even when there are no boxes
-                augmented = self.transform(image=image_np, bboxes=[], category_ids=[], idxs=[])
+                augmented = self.transform(
+                    image=image_np, bboxes=[], category_ids=[], idxs=[]
+                )
             else:
                 augmented = self.transform(image=image_np)
             return Image.fromarray(augmented["image"]), None
@@ -776,7 +805,11 @@ class AlbumentationsWrapper:
         image_np = np.array(image)
 
         # Convert labels tensor to Python list (required by Albumentations category_ids)
-        labels = target["labels"].cpu().tolist() if torch.is_tensor(target["labels"]) else list(target["labels"])
+        labels = (
+            target["labels"].cpu().tolist()
+            if torch.is_tensor(target["labels"])
+            else list(target["labels"])
+        )
 
         # === Apply Transform ===
         if self._is_geometric and "masks" in target and "boxes" not in target:
@@ -786,7 +819,9 @@ class AlbumentationsWrapper:
             )
         if self._is_geometric and "boxes" in target:
             # Geometric path: transform image and boxes together
-            image_out, target_out = self._apply_geometric_transform(image_np, target, labels)
+            image_out, target_out = self._apply_geometric_transform(
+                image_np, target, labels
+            )
         else:
             # Non-geometric path: transform image only
             augmented = self.transform(image=image_np)
@@ -872,10 +907,14 @@ class AlbumentationsWrapper:
         elif isinstance(config_dict, dict):
             entries = [{k: v} for k, v in config_dict.items()]
         else:
-            raise TypeError(f"config_dict must be a dictionary or list, got {type(config_dict)}")
+            raise TypeError(
+                f"config_dict must be a dictionary or list, got {type(config_dict)}"
+            )
 
         if not entries:
-            logger.warning("Empty augmentation config provided, no transforms will be applied")
+            logger.warning(
+                "Empty augmentation config provided, no transforms will be applied"
+            )
             return []
 
         transforms = []
