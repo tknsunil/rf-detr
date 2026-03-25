@@ -621,8 +621,9 @@ class AlbumentationsWrapper:
         target_out: Dict[str, Any] = target.copy()
         bboxes_aug = augmented["bboxes"]
         kept_idxs = augmented.get("idxs", idxs)
-
+        # Convert kept_idxs to numpy array with integer dtype for advanced indexing
         logger.info(f"kept_idxs type: {type(kept_idxs)}, value: {kept_idxs}")
+        kept_idxs = np.asarray(kept_idxs, dtype=np.int64)
         # Update target with transformed boxes and labels
         if len(bboxes_aug) == 0:
             target_out["boxes"] = torch.zeros((0, 4), dtype=torch.float32)
