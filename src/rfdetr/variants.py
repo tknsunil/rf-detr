@@ -20,6 +20,11 @@ __all__ = [
     "RFDETRMedium",
     "RFDETRLarge",
     "RFDETRLargeDeprecated",
+    "RFDETRPose",
+    "RFDETRPoseNano",
+    "RFDETRPoseSmall",
+    "RFDETRPoseMedium",
+    "RFDETRPoseLarge",
     "RFDETRSeg",
     "RFDETRSegPreview",
     "RFDETRSegNano",
@@ -33,12 +38,18 @@ __all__ = [
 import warnings
 
 from rfdetr.config import (
+    KeypointTrainConfig,
     ModelConfig,
     RFDETRBaseConfig,
     RFDETRLargeConfig,
     RFDETRLargeDeprecatedConfig,
     RFDETRMediumConfig,
     RFDETRNanoConfig,
+    RFDETRPoseConfig,
+    RFDETRPoseLargeConfig,
+    RFDETRPoseMediumConfig,
+    RFDETRPoseNanoConfig,
+    RFDETRPoseSmallConfig,
     RFDETRSeg2XLargeConfig,
     RFDETRSegLargeConfig,
     RFDETRSegMediumConfig,
@@ -211,3 +222,81 @@ class RFDETRSegXLarge(RFDETRSeg):
 class RFDETRSeg2XLarge(RFDETRSeg):
     size = "rfdetr-seg-2xlarge"
     _model_config_class = RFDETRSeg2XLargeConfig
+
+
+class RFDETRPose(RFDETR):
+    """
+    RF-DETR Pose estimation model for keypoint/pose detection.
+
+    Outputs (x, y, visibility) for each keypoint per detected object,
+    following YOLOv11's approach for pose estimation.
+
+    Example:
+        >>> model = RFDETRPose()
+        >>> detections = model.predict("image.jpg")
+        >>> # Access keypoints via detections.data["keypoints"]
+        >>> keypoints = detections.data.get("keypoints")  # [N, K, 3]
+    """
+
+    size = "rfdetr-pose"
+    _train_config_class = KeypointTrainConfig
+
+    def get_model_config(self, **kwargs):
+        return RFDETRPoseConfig(**kwargs)
+
+    def get_train_config(self, **kwargs):
+        # Automatically use num_keypoints from model config if not specified
+        if "num_keypoints" not in kwargs:
+            model_config = getattr(self, "model_config", None)
+            if model_config is None:
+                model_config = self.get_model_config()
+            kwargs["num_keypoints"] = model_config.num_keypoints
+        return KeypointTrainConfig(**kwargs)
+
+
+class RFDETRPoseNano(RFDETRPose):
+    """
+    RF-DETR Pose Nano - smallest and fastest pose estimation model.
+
+    Uses rf-detr-nano.pth backbone with keypoint head.
+    Resolution: 384, Decoder layers: 2
+    """
+
+    size = "rfdetr-pose-nano"
+    _model_config_class = RFDETRPoseNanoConfig
+
+
+class RFDETRPoseSmall(RFDETRPose):
+    """
+    RF-DETR Pose Small - balance of speed and accuracy.
+
+    Uses rf-detr-small.pth backbone with keypoint head.
+    Resolution: 512, Decoder layers: 3
+    """
+
+    size = "rfdetr-pose-small"
+    _model_config_class = RFDETRPoseSmallConfig
+
+
+class RFDETRPoseMedium(RFDETRPose):
+    """
+    RF-DETR Pose Medium - default pose estimation model.
+
+    Uses rf-detr-medium.pth backbone with keypoint head.
+    Resolution: 576, Decoder layers: 4
+    """
+
+    size = "rfdetr-pose-medium"
+    _model_config_class = RFDETRPoseMediumConfig
+
+
+class RFDETRPoseLarge(RFDETRPose):
+    """
+    RF-DETR Pose Large - highest accuracy pose estimation model.
+
+    Uses rf-detr-large.pth backbone with keypoint head.
+    Resolution: 768, Decoder layers: 6
+    """
+
+    size = "rfdetr-pose-large"
+    _model_config_class = RFDETRPoseLargeConfig

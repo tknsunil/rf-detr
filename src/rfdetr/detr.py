@@ -35,7 +35,6 @@ from rfdetr.config import (
 )
 from rfdetr.datasets.coco import is_valid_coco_dataset
 from rfdetr.datasets.yolo import is_valid_yolo_dataset
-from rfdetr.inference import ModelContext, _build_model_context
 from rfdetr.utilities.decorators import deprecated
 from rfdetr.utilities.logger import get_logger
 
@@ -46,7 +45,7 @@ except Exception:
 
 logger = get_logger()
 
-# ModelContext and _build_model_context are eagerly imported above (runtime use in get_model).
+# ModelContext and _build_model_context are lazily imported in get_model to avoid circular imports.
 _VARIANT_EXPORTS = (
     "RFDETRBase",
     "RFDETRLarge",
@@ -63,7 +62,7 @@ _VARIANT_EXPORTS = (
     "RFDETRSegXLarge",
     "RFDETRSmall",
 )
-__all__ = ["RFDETR", "ModelContext", *_VARIANT_EXPORTS]
+__all__ = ["RFDETR", *_VARIANT_EXPORTS]
 
 
 class RFDETR:
@@ -459,7 +458,7 @@ class RFDETR:
         """
         return self._train_config_class(**kwargs)
 
-    def get_model(self, config: ModelConfig) -> ModelContext:
+    def get_model(self, config: ModelConfig):
         """Retrieve a model context from the provided architecture configuration.
 
         Args:
@@ -469,6 +468,7 @@ class RFDETR:
             ModelContext with model, postprocess, device, resolution, args,
             and class_names attributes.
         """
+        from rfdetr.inference import _build_model_context
         return _build_model_context(config)
 
     @property
