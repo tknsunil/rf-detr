@@ -388,7 +388,7 @@ class AlbumentationsWrapper:
                     clip=True,  # Clip box coordinates to image boundaries after transformation
                 ),
                 keypoint_params=A.KeypointParams(
-                    format="xy",  # Keypoints are in (x, y) format
+                    coord_format="xy",  # Keypoints are in (x, y) format
                     label_fields=["keypoint_visibilities"],  # Track visibility for per-keypoint field sync
                     remove_invisible=False,  # Keep keypoints even if they go out of bounds
                 ),
