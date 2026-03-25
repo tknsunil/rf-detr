@@ -621,6 +621,8 @@ class AlbumentationsWrapper:
         target_out: Dict[str, Any] = target.copy()
         bboxes_aug = augmented["bboxes"]
         kept_idxs = augmented.get("idxs", idxs)
+
+        logger.info(f"kept_idxs type: {type(kept_idxs)}, value: {kept_idxs}")
         # Update target with transformed boxes and labels
         if len(bboxes_aug) == 0:
             target_out["boxes"] = torch.zeros((0, 4), dtype=torch.float32)
@@ -684,6 +686,8 @@ class AlbumentationsWrapper:
             if len(keypoints_aug) > 0 and num_instances > 0:
                 # Reshape to (num_instances, K, 2) for xy coordinates
                 keypoints_aug = keypoints_aug.reshape(num_instances, K, 2)
+                # DEBUG: Log shapes and kept_idxs type before indexing
+                logger.info(f"Before indexing: keypoints_aug.shape={keypoints_aug.shape}, kept_idxs type={type(kept_idxs)}, kept_idxs={kept_idxs}")
                 keypoints_aug = keypoints_aug[kept_idxs]
                 # Recombine with visibility from label_fields
                 visibilities_aug = np.array(visibilities_aug, dtype=np.float32).reshape(num_instances, K)
