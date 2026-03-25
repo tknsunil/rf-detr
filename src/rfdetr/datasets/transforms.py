@@ -567,13 +567,18 @@ class AlbumentationsWrapper:
             keypoints_pixel[..., 0] *= orig_w
             keypoints_pixel[..., 1] *= orig_h
 
-            N, K, _ = keypoints_pixel.shape
+            N, K, C = keypoints_pixel.shape
+            # DEBUG: Log keypoints shape to diagnose reshape issues
+            print(f"[DEBUG] keypoints_pixel shape: {keypoints_pixel.shape}, N={N}, K={K}, C={C}, total={keypoints_pixel.size}")
+            print(f"[DEBUG] Attempting reshape to (N*K, 2) = ({N*K}, 2) which requires {N*K*2} elements")
             # Convert to list of (x, y) tuples - visibility is tracked separately via keypoint_params
+            # First reshape to (N, K, 2) to extract only x,y (ignoring visibility), then flatten to list
+            keypoints_xy = keypoints_pixel[..., :2]  # Shape: (N, K, 2)
             keypoints_list = [
-                tuple(pt) for pt in keypoints_pixel.reshape(N * K, 2).astype(np.float32)
+                tuple(pt) for pt in keypoints_xy.reshape(N * K, 2).astype(np.float32)
             ]
             # Store visibility separately for label_fields in albumentations
-            keypoint_visibilities = keypoints_pixel.reshape(N * K, 3)[:, 2].tolist()
+            keypoint_visibilities = keypoints_pixel[..., 2].reshape(N * K).tolist()
 
         # Filter degenerate boxes
         if num_boxes > 0:
@@ -590,11 +595,12 @@ class AlbumentationsWrapper:
                 if keypoints_list is not None:
                     keypoints_pixel = keypoints_pixel[valid_mask]
                     N = keypoints_pixel.shape[0]
-                    # Re-create keypoints list with filtered data
+                    # Re-create keypoints list with filtered data (using same fix as above)
+                    keypoints_xy = keypoints_pixel[..., :2]  # Shape: (N, K, 2)
                     keypoints_list = [
-                        tuple(pt) for pt in keypoints_pixel.reshape(N * K, 2).astype(np.float32)
+                        tuple(pt) for pt in keypoints_xy.reshape(N * K, 2).astype(np.float32)
                     ]
-                    keypoint_visibilities = keypoints_pixel.reshape(N * K, 3)[:, 2].tolist()
+                    keypoint_visibilities = keypoints_pixel[..., 2].reshape(N * K).tolist()
 
         transform_kwargs = {
             "image": image_np,
